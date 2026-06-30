@@ -1,0 +1,238 @@
+package me.yourname.smpcore;
+
+import org.bukkit.Material;
+import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.Listener;
+
+import org.bukkit.event.inventory.PrepareItemCraftEvent;
+import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.InventoryDragEvent;
+
+import org.bukkit.event.player.PlayerAttemptPickupItemEvent;
+import org.bukkit.event.player.PlayerDropItemEvent;
+import org.bukkit.event.player.PlayerCommandPreprocessEvent;
+import org.bukkit.event.player.PlayerMoveEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
+
+import org.bukkit.event.entity.EntityDamageByEntityEvent;
+
+import org.bukkit.inventory.ItemStack;
+import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.util.Vector;
+
+import java.util.HashMap;
+import java.util.Map;
+import java.util.UUID;
+
+public class SMPCorePro extends JavaPlugin implements Listener {
+
+    private final Map<UUID, Long> clickTimer = new HashMap<>();
+    private final Map<UUID, Long> hitTimer = new HashMap<>(); // FIX: Changed interface consistency
+    private final Map<UUID, Double> lastY = new HashMap<>();
+
+    @Override
+    public void onEnable() {
+        getServer().getPluginManager().registerEvents(this, this);
+        getLogger().info("SMPCore PRO enabled successfully!");
+    }
+
+    @Override
+    public void onDisable() {
+        clickTimer.clear();
+        hitTimer.clear();
+        lastY.clear();
+    }
+
+    // ---------------------------
+    // BYPASS
+    // ---------------------------
+    private boolean bypass(Player p) {
+        return p.isOp() || p.hasPermission("smp.bypass");
+    }
+
+    // ---------------------------
+    // FIXED MACE CHECK (NATIVE 1.21+)
+    // ---------------------------
+    private boolean isMace(ItemStack item) {
+        if (item == null) return false;
+        try {
+            return item.getType() == Material.MACE;
+        } catch (NoSuchFieldError e) {
+            return item.getType().name().equals("MACE");
+        }
+    }
+
+    // ---------------------------
+    // CRAFT BLOCK
+    // ---------------------------
+    @EventHandler
+    public void onCraft(PrepareItemCraftEvent event) {
+        if (!(event.getView().getPlayer() instanceof Player p)) return;
+        if (bypass(p)) return;
+
+        ItemStack result = event.getInventory().getResult();
+        if (isMace(result)) {
+            event.getInventory().setResult(new ItemStack(Material.AIR));
+        }
+    }
+
+    // ---------------------------
+    // PICKUP BLOCK
+    // ---------------------------
+    @EventHandler
+    public void onPickup(PlayerAttemptPickupItemEvent event) {
+        Player p = event.getPlayer();
+        if (bypass(p)) return;
+
+        if (isMace(event.getItem().getItemStack())) {
+            event.setCancelled(true);
+            event.getItem().remove();
+        }
+    }
+
+    // ---------------------------
+    // DROP BLOCK
+    // ---------------------------
+    @EventHandler
+    public void onDrop(PlayerDropItemEvent event) {
+        Player p = event.getPlayer();
+        if (bypass(p)) return;
+
+        if (isMace(event.getItemDrop().getItemStack())) {
+            event.setCancelled(true);
+        }
+    }
+
+    // ---------------------------
+    // INVENTORY SAFE HANDLING
+    // ---------------------------
+    @EventHandler
+    public void onInventoryClick(InventoryClickEvent event) {
+        if (!(event.getWhoClicked() instanceof Player p)) return;
+        if (bypass(p)) return;
+
+        if (isMace(event.getCurrentItem()) || isMace(event.getCursor())) {
+            event.setCancelled(true);
+            return;
+        }
+
+        UUID id = p.getUniqueId();
+        long now = System.currentTimeMillis();
+        Long last = clickTimer.get(id);
+
+        if (last != null && (now - last) < 75) {
+            event.setCancelled(true);
+            return;
+        }
+
+        clickTimer.put(id, now);
+    }
+
+    // ---------------------------
+    // DRAG CLEANER
+    // ---------------------------
+    @EventHandler
+    public void onDrag(InventoryDragEvent event) {
+        if (!(event.getWhoClicked() instanceof Player p)) return;
+        if (bypass(p)) return;
+
+        for (ItemStack item : event.getNewItems().values()) {
+            if (isMace(item)) {
+                event.setCancelled(true);
+                return;
+            }
+        }
+    }
+
+    // ---------------------------
+    // COMMAND BLOCK
+    // ---------------------------
+    @EventHandler
+    public void onCommand(PlayerCommandPreprocessEvent event) {
+        Player p = event.getPlayer();
+        if (bypass(p)) return;
+
+        String msg = event.getMessage().toLowerCase().trim();
+
+        if (msg.matches("^/(minecraft:)?give\\s+.*mace.*")) {
+            event.setCancelled(true);
+            p.sendMessage("§cMaces are disabled on this SMP.");
+        }
+    }
+
+    // ---------------------------
+    // COMBAT ANTI-SPAM
+    // ---------------------------
+    @EventHandler
+    public void onHit(EntityDamageByEntityEvent event) {
+        if (!(event.getDamager() instanceof Player p)) return;
+        if (bypass(p)) return;
+
+        UUID id = p.getUniqueId();
+        long now = System.currentTimeMillis();
+        Long last = hitTimer.get(id);
+
+        if (last != null && (now - last) < 120) {
+            event.setCancelled(true);
+            p.sendMessage("§c[SMPCore PRO] Slow down.");
+            return;
+        }
+
+        hitTimer.put(id, now);
+    }
+
+    // ---------------------------
+    // SAFE ANTI-FLY
+    // ---------------------------
+    @EventHandler
+    public void onMove(PlayerMoveEvent event) {
+        Player p = event.getPlayer();
+        if (bypass(p)) return;
+
+        if (event.getTo() == null) return;
+        
+        if (event.getFrom().getY() == event.getTo().getY()) return;
+
+        UUID id = p.getUniqueId();
+        double y = event.getTo().getY();
+        double last = lastY.getOrDefault(id, event.getFrom().getY());
+
+        double diff = y - last;
+
+        // FIX: Evaluated p.getNoDamageTicks() > 0 to allow standard damage knockback behavior
+        if (diff > 5.0 &&
+                !p.isFlying() &&
+                !p.isGliding() &&
+                !p.isInsideVehicle() &&
+                !p.isRiptiding() &&
+                p.getNoDamageTicks() == 0 && // Intentionally left to evaluate if tick logic has standard immunity
+                !p.getLocation().getBlock().getType().isSolid() && 
+                p.getFallDistance() < 1.5) {
+
+            // To fully clear false positives during combat, wrap condition with: p.getNoDamageTicks() > 0 fallback check
+            if (p.getNoDamageTicks() > 0) {
+                lastY.put(id, y);
+                return;
+            }
+
+            event.setCancelled(true);
+            p.setVelocity(new Vector(0, -0.5, 0));
+            p.sendMessage("§c[SMPCore PRO] Movement flagged.");
+        }
+
+        lastY.put(id, y);
+    }
+
+    // ---------------------------
+    // CLEANUP MEMORY
+    // ---------------------------
+    @EventHandler
+    public void onQuit(PlayerQuitEvent event) {
+        UUID id = event.getPlayer().getUniqueId();
+        clickTimer.remove(id);
+        hitTimer.remove(id);
+        lastY.remove(id);
+    }
+}
+
